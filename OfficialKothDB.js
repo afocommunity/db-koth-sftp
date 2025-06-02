@@ -9,11 +9,12 @@ The Unnamed (https://theunnamedcorp.com/)
 */
 
 import BasePlugin from './base-plugin.js';
-import path from 'path';
 import { DataTypes } from 'sequelize';
-import { fileURLToPath } from 'url';
+import path from 'path';
+import fs from 'fs';
+import { readFile, writeFile } from 'node:fs/promises';
 
-export default class OfficialKothDBSFTP extends BasePlugin {
+export default class OfficialKothDB extends BasePlugin {
   static get description() {
     return 'Pushes ServerSettings.json from database on startup and syncs player data on join/leave; ServerSettings sync every 90 seconds only when player count is 50 or more';
   }
@@ -37,10 +38,11 @@ export default class OfficialKothDBSFTP extends BasePlugin {
         connector: 'sequelize',
       },
       sftp: {
-        required: true,
-        description: 'SFTP Credentials',
-        default: null,
+        required: false,
+        description: 'SFTP Credentials.',
+        default: false,
       },
+
       syncEnabled: {
         required: false,
         description: 'Whether periodic sync of ServerSettings.json is enabled.',
@@ -52,9 +54,11 @@ export default class OfficialKothDBSFTP extends BasePlugin {
   constructor(server, options, connectors) {
     super(server, options, connectors);
 
-    this.models = {};
+    //? Setup SFTP Client later
+    this.isSFTP = Boolean(options.sftp);
+    this.sftpOptions = options.sftp;
 
-    this.clientOptions = options.sftp;
+    this.models = {};
 
     this.onPlayerConnected = this.onPlayerConnected.bind(this);
     this.onPlayerDisconnected = this.onPlayerDisconnected.bind(this);
@@ -100,18 +104,19 @@ export default class OfficialKothDBSFTP extends BasePlugin {
       );
       throw err;
     }
-
-    try {
-      const Client = (await import('ssh2-sftp-client')).default;
-      this.client = new Client();
-      await this.client.connect(this.clientOptions);
-      this.verbose(1, 'OfficialKothDB: SFTP initialized');
-    } catch (error) {
-      this.verbose(
-        1,
-        `OfficialKothDB: Failed to connect to SFTP: ${error.message}`
-      );
-      throw error;
+    if (this.isSFTP) {
+      try {
+        const Client = (await import('ssh2-sftp-client')).default;
+        this.sftpClient = new Client();
+        await this.sftpClient.connect(this.sftpOptions);
+        this.verbose(1, 'OfficialKothDB: SFTP initialized');
+      } catch (error) {
+        this.verbose(
+          1,
+          `OfficialKothDB: Failed to connect to SFTP: ${error.message}`
+        );
+        throw error;
+      }
     }
   }
 
@@ -122,7 +127,7 @@ export default class OfficialKothDBSFTP extends BasePlugin {
       `OfficialKothDB: Attempting to read PlayerList.json from ${playerListPath}`
     );
 
-    if (!(await this.client.exists(playerListPath))) {
+    if (!(await this.fileExists(playerListPath))) {
       this.verbose(
         1,
         `OfficialKothDB: PlayerList.json does not exist at ${playerListPath}`
@@ -131,7 +136,7 @@ export default class OfficialKothDBSFTP extends BasePlugin {
     }
 
     try {
-      const data = await this.client.get(playerListPath);
+      const data = await this.fileRead(playerListPath, 'utf8');
       if (!data) {
         this.verbose(
           1,
@@ -177,9 +182,9 @@ export default class OfficialKothDBSFTP extends BasePlugin {
           typeof serverSettings.playerdata === 'string'
             ? JSON.parse(serverSettings.playerdata)
             : serverSettings.playerdata;
-        await this.client.put(
-          JSON.stringify(serverData, null, 2),
-          serverSettingsPath
+        await this.fileWrite(
+          serverSettingsPath,
+          JSON.stringify(serverData, null, 2)
         );
         this.verbose(
           1,
@@ -225,9 +230,9 @@ export default class OfficialKothDBSFTP extends BasePlugin {
           `OfficialKothDB: Checking player file at ${playerFilePath}`
         );
 
-        if (await this.client.exists(playerFilePath)) {
+        if (await this.fileExists(playerFilePath)) {
           try {
-            const playerDataRaw = await this.client.get(playerFilePath);
+            const playerDataRaw = await this.fileRead(playerFilePath, 'utf8');
             const playerData = JSON.parse(playerDataRaw);
 
             await this.models.PlayerData.upsert(
@@ -275,13 +280,15 @@ export default class OfficialKothDBSFTP extends BasePlugin {
       `OfficialKothDB: Configured kothFolderPath: ${this.options.kothFolderPath}`
     );
 
-    this.kothpath = this.options.kothFolderPath;
+    this.kothpath = path.isAbsolute(this.options.kothFolderPath)
+      ? this.options.kothFolderPath
+      : path.resolve(process.cwd(), this.options.kothFolderPath);
 
     this.verbose(1, `OfficialKothDB: Resolved KOTH path: ${this.kothpath}`);
 
-    if (!(await this.client.exists(this.kothpath))) {
+    if (!(await this.fileExists(this.kothpath))) {
       try {
-        this.client.mkdir(this.kothpath, true);
+        await this.directoryWrite(this.kothpath, { recursive: true });
         this.verbose(
           1,
           `OfficialKothDB: Created KOTH directory at ${this.kothpath}`
@@ -300,7 +307,7 @@ export default class OfficialKothDBSFTP extends BasePlugin {
     }
 
     const playerListPath = path.join(this.kothpath, 'PlayerList.json');
-    if (!(await this.client.exists(playerListPath))) {
+    if (!(await this.fileExists(playerListPath))) {
       this.verbose(
         1,
         `OfficialKothDB: PlayerList.json not found at "${playerListPath}". Plugin will not sync player data.`
@@ -334,7 +341,6 @@ export default class OfficialKothDBSFTP extends BasePlugin {
       clearInterval(this.syncInterval);
       this.verbose(1, 'OfficialKothDB: Stopped periodic sync');
     }
-    this.client.end();
   }
 
   getplayerfilename(player) {
@@ -368,7 +374,7 @@ export default class OfficialKothDBSFTP extends BasePlugin {
       typeof playerdb.playerdata === 'string'
         ? JSON.parse(playerdb.playerdata)
         : playerdb.playerdata;
-    await this.client.put(JSON.stringify(playerdata, null, 2), playerfilename);
+    await this.fileWrite(playerfilename, JSON.stringify(playerdata, null, 2));
     this.verbose(1, 'OfficialKothDB: saved file');
   }
 
@@ -379,8 +385,8 @@ export default class OfficialKothDBSFTP extends BasePlugin {
       1,
       `OfficialKothDB: attempting to save file ${playerfilename} to db`
     );
-    if (!(await this.client.exists(playerfilename))) return;
-    const playerdataRaw = await this.client.get(playerfilename);
+    if (!(await this.fileExists(playerfilename))) return;
+    const playerdataRaw = await this.fileRead(playerfilename, 'utf8');
     let playerdata;
     try {
       playerdata = JSON.parse(playerdataRaw);
@@ -408,5 +414,35 @@ export default class OfficialKothDBSFTP extends BasePlugin {
       }
     );
     this.verbose(1, `OfficialKothDB: saved data to DB`);
+  }
+
+  
+  async fileExists(filePath) {
+    if (this.isSFTP) {
+      return this.sftpClient.exists(filePath);
+    } else {
+      return fs.existsSync(filePath);
+    }
+  }
+  async fileRead(filePath, encoding = 'utf8') {
+    if (this.isSFTP) {
+      return (await this.sftpClient.get(filePath)).toString();
+    } else {
+      return readFile(filePath, encoding);
+    }
+  }
+  async fileWrite(filePath, content) {
+    if (this.isSFTP) {
+      return this.sftpClient.put(content, filePath);
+    } else {
+      return writeFile(filePath, content);
+    }
+  }
+  async directoryWrite(directoryPath, options = { recursive: true }) {
+    if (this.isSFTP) {
+      return this.sftpClient.mkdir(directoryPath, options?.recursive);
+    } else {
+      return fs.mkdirSync(directoryPath, options);
+    }
   }
 }

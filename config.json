@@ -11,13 +11,13 @@
   },
   "plugins": [
     {
-      "plugin": "OfficialKothDBSFTP",
+      "plugin": "OfficialKothDB",
       "enabled": true,
       "kothFolderPath": "./SquadGame/Saved/KOTH/",
       "database": "mysql",
       "websocketPort": "",
       "sftp": {
-        "host": "",
+        "host": "Remove SFTP if not using SFTP",
         "port": "",
         "username":"",
         "password":""
