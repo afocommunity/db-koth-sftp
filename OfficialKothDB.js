@@ -416,10 +416,9 @@ export default class OfficialKothDB extends BasePlugin {
     this.verbose(1, `OfficialKothDB: saved data to DB`);
   }
 
-  
   async fileExists(filePath) {
     if (this.isSFTP) {
-      return this.sftpClient.exists(filePath);
+      return await this.sftpClient.exists(filePath);
     } else {
       return fs.existsSync(filePath);
     }
@@ -428,19 +427,19 @@ export default class OfficialKothDB extends BasePlugin {
     if (this.isSFTP) {
       return (await this.sftpClient.get(filePath)).toString();
     } else {
-      return readFile(filePath, encoding);
+      return await readFile(filePath, encoding);
     }
   }
   async fileWrite(filePath, content) {
     if (this.isSFTP) {
-      return this.sftpClient.put(content, filePath);
+      return await this.sftpClient.put(content, filePath);
     } else {
-      return writeFile(filePath, content);
+      return await writeFile(filePath, content);
     }
   }
   async directoryWrite(directoryPath, options = { recursive: true }) {
     if (this.isSFTP) {
-      return this.sftpClient.mkdir(directoryPath, options?.recursive);
+      return await this.sftpClient.mkdir(directoryPath, options?.recursive);
     } else {
       return fs.mkdirSync(directoryPath, options);
     }
