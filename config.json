@@ -11,11 +11,17 @@
   },
   "plugins": [
     {
-      "plugin": "OfficialKothDB",
+      "plugin": "OfficialKothDBSFTP",
       "enabled": true,
       "kothFolderPath": "./SquadGame/Saved/KOTH/",
       "database": "mysql",
-      "websocketPort": ""
+      "websocketPort": "",
+      "sftp": {
+        "host": "",
+        "port": "",
+        "username":"",
+        "password":""
+      }
     }
   ]
 }

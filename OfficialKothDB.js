@@ -9,15 +9,13 @@ The Unnamed (https://theunnamedcorp.com/)
 */
 
 import BasePlugin from './base-plugin.js';
+import path from 'path';
 import { DataTypes } from 'sequelize';
 import { fileURLToPath } from 'url';
-import path from 'path';
-import fs from 'fs';
-import { readFile, writeFile } from 'node:fs/promises';
 
-export default class OfficialKothDB extends BasePlugin {
+export default class OfficialKothDBSFTP extends BasePlugin {
   static get description() {
-    return "Pushes ServerSettings.json from database on startup and syncs player data on join/leave; ServerSettings sync every 90 seconds only when player count is 50 or more";
+    return 'Pushes ServerSettings.json from database on startup and syncs player data on join/leave; ServerSettings sync every 90 seconds only when player count is 50 or more';
   }
 
   static get defaultEnabled() {
@@ -28,20 +26,26 @@ export default class OfficialKothDB extends BasePlugin {
     return {
       kothFolderPath: {
         required: false,
-        description: 'Folder path (relative to squadjs index.js) of the koth data folder.',
-        default: './SquadGame/Saved/KOTH/'
+        description:
+          'Folder path (relative to squadjs index.js) of the koth data folder.',
+        default: './SquadGame/Saved/KOTH/',
       },
       database: {
         required: true,
         description: 'Database to use',
         default: false,
-        connector: 'sequelize'
+        connector: 'sequelize',
+      },
+      sftp: {
+        required: true,
+        description: 'SFTP Credentials',
+        default: null,
       },
       syncEnabled: {
         required: false,
         description: 'Whether periodic sync of ServerSettings.json is enabled.',
-        default: true
-      }
+        default: true,
+      },
     };
   }
 
@@ -50,72 +54,111 @@ export default class OfficialKothDB extends BasePlugin {
 
     this.models = {};
 
+    this.clientOptions = options.sftp;
+
     this.onPlayerConnected = this.onPlayerConnected.bind(this);
     this.onPlayerDisconnected = this.onPlayerDisconnected.bind(this);
   }
 
   createModel(name, schema) {
-    this.models[name] = this.options.database.define(`KOTH_${name}`, schema, { timestamps: false });
+    this.models[name] = this.options.database.define(`KOTH_${name}`, schema, {
+      timestamps: false,
+    });
+    return this.models[name];
   }
 
   async prepareToMount() {
-    const playeridmeta = { 
+    const playeridmeta = {
       type: DataTypes.STRING,
-      unique: true
+      unique: true,
     };
     await this.createModel('PlayerData', {
       id: {
         type: DataTypes.INTEGER,
         primaryKey: true,
-        autoIncrement: true
+        autoIncrement: true,
       },
       player_id: playeridmeta,
       lastsave: {
-        type: DataTypes.DATE
+        type: DataTypes.DATE,
       },
       serversave: {
-        type: DataTypes.INTEGER
+        type: DataTypes.INTEGER,
       },
       playerdata: {
-        type: DataTypes.JSON
-      }
+        type: DataTypes.JSON,
+      },
     });
 
     try {
       await this.models.PlayerData.sync();
       this.verbose(1, 'OfficialKothDB: PlayerData table initialized');
     } catch (err) {
-      this.verbose(1, `OfficialKothDB: Failed to sync PlayerData table: ${err.message}`);
+      this.verbose(
+        1,
+        `OfficialKothDB: Failed to sync PlayerData table: ${err.message}`
+      );
       throw err;
+    }
+
+    try {
+      const Client = (await import('ssh2-sftp-client')).default;
+      this.client = new Client();
+      await this.client.connect(this.clientOptions);
+      this.verbose(1, 'OfficialKothDB: SFTP initialized');
+    } catch (error) {
+      this.verbose(
+        1,
+        `OfficialKothDB: Failed to connect to SFTP: ${error.message}`
+      );
+      throw error;
     }
   }
 
   async readPlayerList() {
     const playerListPath = path.join(this.kothpath, 'PlayerList.json');
-    this.verbose(1, `OfficialKothDB: Attempting to read PlayerList.json from ${playerListPath}`);
+    this.verbose(
+      1,
+      `OfficialKothDB: Attempting to read PlayerList.json from ${playerListPath}`
+    );
 
-    if (!fs.existsSync(playerListPath)) {
-      this.verbose(1, `OfficialKothDB: PlayerList.json does not exist at ${playerListPath}`);
+    if (!(await this.client.exists(playerListPath))) {
+      this.verbose(
+        1,
+        `OfficialKothDB: PlayerList.json does not exist at ${playerListPath}`
+      );
       return [];
     }
 
     try {
-      const data = await readFile(playerListPath, 'utf8');
+      const data = await this.client.get(playerListPath);
       if (!data) {
-        this.verbose(1, `OfficialKothDB: PlayerList.json is empty at ${playerListPath}`);
+        this.verbose(
+          1,
+          `OfficialKothDB: PlayerList.json is empty at ${playerListPath}`
+        );
         return [];
       }
 
       const jsonData = JSON.parse(data);
       const steamIDs = jsonData.players || [];
       if (!Array.isArray(steamIDs)) {
-        this.verbose(1, `OfficialKothDB: Invalid format in PlayerList.json: 'players' is not an array`);
+        this.verbose(
+          1,
+          `OfficialKothDB: Invalid format in PlayerList.json: 'players' is not an array`
+        );
         return [];
       }
-      this.verbose(1, `OfficialKothDB: Successfully read ${steamIDs.length} steamIDs from PlayerList.json`);
+      this.verbose(
+        1,
+        `OfficialKothDB: Successfully read ${steamIDs.length} steamIDs from PlayerList.json`
+      );
       return steamIDs;
     } catch (err) {
-      this.verbose(1, `OfficialKothDB: Error reading or parsing PlayerList.json at ${playerListPath}: ${err.message}`);
+      this.verbose(
+        1,
+        `OfficialKothDB: Error reading or parsing PlayerList.json at ${playerListPath}: ${err.message}`
+      );
       return [];
     }
   }
@@ -123,18 +166,36 @@ export default class OfficialKothDB extends BasePlugin {
   async syncServerSettings() {
     try {
       const serverSettings = await this.models.PlayerData.findOne({
-        where: { player_id: 'ServerSettings' }
+        where: { player_id: 'ServerSettings' },
       });
       if (serverSettings) {
-        const serverSettingsPath = path.join(this.kothpath, 'ServerSettings.json');
-        const serverData = typeof serverSettings.playerdata === 'string' ? JSON.parse(serverSettings.playerdata) : serverSettings.playerdata;
-        await writeFile(serverSettingsPath, JSON.stringify(serverData, null, 2));
-        this.verbose(1, 'OfficialKothDB: Pushed ServerSettings.json from database');
+        const serverSettingsPath = path.join(
+          this.kothpath,
+          'ServerSettings.json'
+        );
+        const serverData =
+          typeof serverSettings.playerdata === 'string'
+            ? JSON.parse(serverSettings.playerdata)
+            : serverSettings.playerdata;
+        await this.client.put(
+          JSON.stringify(serverData, null, 2),
+          serverSettingsPath
+        );
+        this.verbose(
+          1,
+          'OfficialKothDB: Pushed ServerSettings.json from database'
+        );
       } else {
-        this.verbose(1, 'OfficialKothDB: No ServerSettings record found in database, skipping push');
+        this.verbose(
+          1,
+          'OfficialKothDB: No ServerSettings record found in database, skipping push'
+        );
       }
     } catch (err) {
-      this.verbose(1, `OfficialKothDB: Error syncing ServerSettings: ${err.message}`);
+      this.verbose(
+        1,
+        `OfficialKothDB: Error syncing ServerSettings: ${err.message}`
+      );
     }
   }
 
@@ -144,20 +205,29 @@ export default class OfficialKothDB extends BasePlugin {
       if (connectedSteamIDs.length >= 50 && this.options.syncEnabled) {
         await this.syncServerSettings();
       } else {
-        this.verbose(1, `OfficialKothDB: Player count (${connectedSteamIDs.length}) below 50 or sync disabled, skipping ServerSettings sync`);
+        this.verbose(
+          1,
+          `OfficialKothDB: Player count (${connectedSteamIDs.length}) below 50 or sync disabled, skipping ServerSettings sync`
+        );
       }
 
       if (connectedSteamIDs.length === 0) {
-        this.verbose(1, 'OfficialKothDB: No connected players found in PlayerList.json');
+        this.verbose(
+          1,
+          'OfficialKothDB: No connected players found in PlayerList.json'
+        );
       }
 
       for (const steamID of connectedSteamIDs) {
         const playerFilePath = path.join(this.kothpath, `${steamID}.json`);
-        this.verbose(1, `OfficialKothDB: Checking player file at ${playerFilePath}`);
+        this.verbose(
+          1,
+          `OfficialKothDB: Checking player file at ${playerFilePath}`
+        );
 
-        if (fs.existsSync(playerFilePath)) {
+        if (await this.client.exists(playerFilePath)) {
           try {
-            const playerDataRaw = await readFile(playerFilePath, 'utf8');
+            const playerDataRaw = await this.client.get(playerFilePath);
             const playerData = JSON.parse(playerDataRaw);
 
             await this.models.PlayerData.upsert(
@@ -165,18 +235,27 @@ export default class OfficialKothDB extends BasePlugin {
                 player_id: steamID,
                 lastsave: new Date(),
                 serversave: this.server.id,
-                playerdata: playerData
+                playerdata: playerData,
               },
               {
-                conflictFields: ['player_id']
+                conflictFields: ['player_id'],
               }
             );
-            this.verbose(1, `OfficialKothDB: Synced player data for ${steamID} to DB`);
+            this.verbose(
+              1,
+              `OfficialKothDB: Synced player data for ${steamID} to DB`
+            );
           } catch (err) {
-            this.verbose(1, `OfficialKothDB: Error syncing player ${steamID}: ${err.message}`);
+            this.verbose(
+              1,
+              `OfficialKothDB: Error syncing player ${steamID}: ${err.message}`
+            );
           }
         } else {
-          this.verbose(1, `OfficialKothDB: Player file for ${steamID} does not exist at ${playerFilePath}`);
+          this.verbose(
+            1,
+            `OfficialKothDB: Player file for ${steamID} does not exist at ${playerFilePath}`
+          );
         }
       }
 
@@ -187,29 +266,45 @@ export default class OfficialKothDB extends BasePlugin {
   }
 
   async mount() {
-    this.verbose(1, `OfficialKothDB: Current working directory: ${process.cwd()}`);
-    this.verbose(1, `OfficialKothDB: Configured kothFolderPath: ${this.options.kothFolderPath}`);
+    this.verbose(
+      1,
+      `OfficialKothDB: Current working directory: ${process.cwd()}`
+    );
+    this.verbose(
+      1,
+      `OfficialKothDB: Configured kothFolderPath: ${this.options.kothFolderPath}`
+    );
 
-    this.kothpath = path.isAbsolute(this.options.kothFolderPath)
-      ? this.options.kothFolderPath
-      : path.resolve(process.cwd(), this.options.kothFolderPath);
+    this.kothpath = this.options.kothFolderPath;
 
     this.verbose(1, `OfficialKothDB: Resolved KOTH path: ${this.kothpath}`);
 
-    if (!fs.existsSync(this.kothpath)) {
+    if (!(await this.client.exists(this.kothpath))) {
       try {
-        fs.mkdirSync(this.kothpath, { recursive: true });
-        this.verbose(1, `OfficialKothDB: Created KOTH directory at ${this.kothpath}`);
+        this.client.mkdir(this.kothpath, true);
+        this.verbose(
+          1,
+          `OfficialKothDB: Created KOTH directory at ${this.kothpath}`
+        );
       } catch (err) {
-        this.verbose(1, `OfficialKothDB: Failed to create KOTH directory at ${this.kothpath}: ${err.message}`);
-        this.verbose(1, `OfficialKothDB: KOTH DATA PATH "${this.kothpath}" DOES NOT EXIST. Plugin shall remain dormant!`);
+        this.verbose(
+          1,
+          `OfficialKothDB: Failed to create KOTH directory at ${this.kothpath}: ${err.message}`
+        );
+        this.verbose(
+          1,
+          `OfficialKothDB: KOTH DATA PATH "${this.kothpath}" DOES NOT EXIST. Plugin shall remain dormant!`
+        );
         return;
       }
     }
 
     const playerListPath = path.join(this.kothpath, 'PlayerList.json');
-    if (!fs.existsSync(playerListPath)) {
-      this.verbose(1, `OfficialKothDB: PlayerList.json not found at "${playerListPath}". Plugin will not sync player data.`);
+    if (!(await this.client.exists(playerListPath))) {
+      this.verbose(
+        1,
+        `OfficialKothDB: PlayerList.json not found at "${playerListPath}". Plugin will not sync player data.`
+      );
     }
 
     await this.syncServerSettings(); // Pull ServerSettings on startup
@@ -231,11 +326,15 @@ export default class OfficialKothDB extends BasePlugin {
 
   async unmount() {
     this.server.removeEventListener('PLAYER_CONNECTED', this.onPlayerConnected);
-    this.server.removeEventListener('PLAYER_DISCONNECTED', this.onPlayerDisconnected);
+    this.server.removeEventListener(
+      'PLAYER_DISCONNECTED',
+      this.onPlayerDisconnected
+    );
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
       this.verbose(1, 'OfficialKothDB: Stopped periodic sync');
     }
+    this.client.end();
   }
 
   getplayerfilename(player) {
@@ -249,32 +348,47 @@ export default class OfficialKothDB extends BasePlugin {
   async onPlayerConnected(info) {
     this.verbose(1, `OfficialKothDB: koth load`);
     const playerfilename = this.getplayerfilename(info.player);
-    this.verbose(1, `OfficialKothDB: attempting to overwrite local data at ${playerfilename}`);
+    this.verbose(
+      1,
+      `OfficialKothDB: attempting to overwrite local data at ${playerfilename}`
+    );
 
     const playerids = await this.getplayerids(info.player);
     this.verbose(1, `OfficialKothDB: retrieved player id of: ${playerids.id}`);
     if (!playerids) return;
     const playerdb = await this.models.PlayerData.findOne({
-      where: { player_id: playerids.id }
+      where: { player_id: playerids.id },
     });
     if (!playerdb) return;
-    this.verbose(1, 'OfficialKothDB: found playerdata in DB and read into memory');
-    const playerdata = typeof playerdb.playerdata === 'string' ? JSON.parse(playerdb.playerdata) : playerdb.playerdata;
-    fs.writeFileSync(playerfilename, JSON.stringify(playerdata, null, 2));
+    this.verbose(
+      1,
+      'OfficialKothDB: found playerdata in DB and read into memory'
+    );
+    const playerdata =
+      typeof playerdb.playerdata === 'string'
+        ? JSON.parse(playerdb.playerdata)
+        : playerdb.playerdata;
+    await this.client.put(JSON.stringify(playerdata, null, 2), playerfilename);
     this.verbose(1, 'OfficialKothDB: saved file');
   }
 
   async onPlayerDisconnected(info) {
     this.verbose(1, `OfficialKothDB: koth save`);
     const playerfilename = this.getplayerfilename(info.player);
-    this.verbose(1, `OfficialKothDB: attempting to save file ${playerfilename} to db`);
-    if (!fs.existsSync(playerfilename)) return;
-    const playerdataRaw = fs.readFileSync(playerfilename, 'utf8');
+    this.verbose(
+      1,
+      `OfficialKothDB: attempting to save file ${playerfilename} to db`
+    );
+    if (!(await this.client.exists(playerfilename))) return;
+    const playerdataRaw = await this.client.get(playerfilename);
     let playerdata;
     try {
       playerdata = JSON.parse(playerdataRaw);
     } catch (err) {
-      this.verbose(1, `OfficialKothDB: Invalid JSON in file ${playerfilename}, skipping: ${err.message}`);
+      this.verbose(
+        1,
+        `OfficialKothDB: Invalid JSON in file ${playerfilename}, skipping: ${err.message}`
+      );
       return;
     }
     this.verbose(1, `OfficialKothDB: read player data into memory`);
@@ -287,10 +401,10 @@ export default class OfficialKothDB extends BasePlugin {
         player_id: playerids.id,
         lastsave: new Date(),
         serversave: this.server.id,
-        playerdata: playerdata
+        playerdata: playerdata,
       },
       {
-        conflictFields: ['player_id']
+        conflictFields: ['player_id'],
       }
     );
     this.verbose(1, `OfficialKothDB: saved data to DB`);
