@@ -42,7 +42,11 @@ export default class OfficialKothDB extends BasePlugin {
         description: 'SFTP Credentials.',
         default: false,
       },
-
+      ftp: {
+        required: false,
+        description: 'FTP Credentials.',
+        default: false,
+      },
       syncEnabled: {
         required: false,
         description: 'Whether periodic sync of ServerSettings.json is enabled.',
@@ -55,8 +59,8 @@ export default class OfficialKothDB extends BasePlugin {
     super(server, options, connectors);
 
     //? Setup SFTP Client later
-    this.isSFTP = Boolean(options.sftp);
-    this.sftpOptions = options.sftp;
+    this.mode = options.sftp ? 'SFTP' : options.ftp ? 'FTP' : 'FS';
+    this.sftpOptions = options.sftp || {};
 
     this.models = {};
 
@@ -104,7 +108,7 @@ export default class OfficialKothDB extends BasePlugin {
       );
       throw err;
     }
-    if (this.isSFTP) {
+    if (this.mode === 'SFTP') {
       try {
         const Client = (await import('ssh2-sftp-client')).default;
         this.sftpClient = new Client();
@@ -417,31 +421,43 @@ export default class OfficialKothDB extends BasePlugin {
   }
 
   async fileExists(filePath) {
-    if (this.isSFTP) {
-      return await this.sftpClient.exists(filePath);
-    } else {
-      return fs.existsSync(filePath);
+    switch (this.mode) {
+      case 'SFTP': {
+        return await this.sftpClient.exists(filePath);
+      }
+      case 'FS': {
+        return fs.existsSync(filePath);
+      }
     }
   }
   async fileRead(filePath, encoding = 'utf8') {
-    if (this.isSFTP) {
-      return (await this.sftpClient.get(filePath)).toString();
-    } else {
-      return await readFile(filePath, encoding);
+    switch (this.mode) {
+      case 'SFTP': {
+        return (await this.sftpClient.get(filePath)).toString();
+      }
+      case 'FS': {
+        return await readFile(filePath, encoding);
+      }
     }
   }
   async fileWrite(filePath, content) {
-    if (this.isSFTP) {
-      return await this.sftpClient.put(content, filePath);
-    } else {
-      return await writeFile(filePath, content);
+    switch (this.mode) {
+      case 'SFTP': {
+        return await this.sftpClient.put(content, filePath);
+      }
+      case 'FS': {
+        return await writeFile(filePath, content);
+      }
     }
   }
   async directoryWrite(directoryPath, options = { recursive: true }) {
-    if (this.isSFTP) {
-      return await this.sftpClient.mkdir(directoryPath, options?.recursive);
-    } else {
-      return fs.mkdirSync(directoryPath, options);
+    switch (this.mode) {
+      case 'SFTP': {
+        return await this.sftpClient.mkdir(directoryPath, options?.recursive);
+      }
+      case 'FS': {
+        return fs.mkdirSync(directoryPath, options);
+      }
     }
   }
 }
